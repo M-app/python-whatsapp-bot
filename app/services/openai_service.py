@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import os
 import time
 import logging
+import json
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -48,35 +49,46 @@ def run_assistant(thread, name):
     assistant = client.beta.assistants.retrieve(OPENAI_ASSISTANT_ID)
 
     # Run the assistant
+    # Create a new run for the thread
     run = client.beta.threads.runs.create(
         thread_id=thread.id,
         assistant_id=assistant.id,
         # instructions=f"You are having a conversation with {name}",
     )
-
+    logging.info(f"RUN BEFORE: {run}")
+    time.sleep(5)
+    logging.info(f"RUN AFTER: {run}")
     # Wait for completion
     # https://platform.openai.com/docs/assistants/how-it-works/runs-and-run-steps#:~:text=under%20failed_at.-,Polling%20for%20updates,-In%20order%20to
-    while run.status != "completed":
-        # Be nice to the API
-        time.sleep(0.5)
-        run = client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
+#     while run.status != "completed":
+#         # Be nice to the API
+#         time.sleep(0.5)
+#         run = client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
 
     # Retrieve the Messages
     messages = client.beta.threads.messages.list(thread_id=thread.id)
     new_message = messages.data[0].content[0].text.value
     logging.info(f"Generated message: {new_message}")
-    return new_message
+    return "tu mama"
+
+def get_outputs_for_tool_call(tool_call):
+    quantity = json.loads(tool_call.function.arguments)["quantity"]
+    category = json.loads(tool_call.function.arguments)["category"]
+    return {
+        "tool_call_id": tool_call.id,
+        "output": f"gasto de {quantity} guardado en la categoria {category}"
+    }
 
 
 def generate_response(message_body, wa_id, name):
     # Check if there is already a thread_id for the wa_id
-    thread_id = check_if_thread_exists(wa_id)
-
+    #thread_id = check_if_thread_exists(wa_id)
+    thread_id = None
     # If a thread doesn't exist, create one and store it
     if thread_id is None:
-        logging.info(f"Creating new thread for {name} with wa_id {wa_id}")
+        #logging.info(f"Creating new thread for {name} with wa_id {wa_id}")
         thread = client.beta.threads.create()
-        store_thread(wa_id, thread.id)
+        #store_thread(wa_id, thread.id)
         thread_id = thread.id
 
     # Otherwise, retrieve the existing thread
@@ -84,14 +96,39 @@ def generate_response(message_body, wa_id, name):
         logging.info(f"Retrieving existing thread for {name} with wa_id {wa_id}")
         thread = client.beta.threads.retrieve(thread_id)
 
-    # Add message to thread
-    message = client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=message_body,
+    assistant = client.beta.assistants.retrieve(OPENAI_ASSISTANT_ID)
+
+    run = client.beta.threads.runs.create(
+        thread_id=thread.id,
+        assistant_id=assistant.id,
+        instructions=message_body
     )
 
-    # Run the assistant and get the new message
-    new_message = run_assistant(thread, name)
+    while run.required_action == None:
+        time.sleep(0.5)
+        run = client.beta.threads.runs.retrieve(
+          thread_id=thread.id,
+          run_id=run.id
+        )
 
-    return new_message
+    tool_calls = run.required_action.submit_tool_outputs.tool_calls
+    tool_outputs = map(get_outputs_for_tool_call, tool_calls)
+    tool_outputs = list(tool_outputs)
+
+    run = client.beta.threads.runs.submit_tool_outputs(
+        thread_id=thread_id,
+        run_id=run.id,
+        tool_outputs=tool_outputs
+    )
+
+    while run.status != "completed":
+        time.sleep(0.5)
+        run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+
+    messages = client.beta.threads.messages.list(
+        thread_id=thread_id
+    )
+
+    #logging.info(f"MESSAGES: {messages.data[0].content[0].text.value}")
+
+    return messages.data[0].content[0].text.value
